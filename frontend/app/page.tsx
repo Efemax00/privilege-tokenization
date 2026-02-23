@@ -18,23 +18,25 @@ import {
 import { useWallet } from "@/context/WalletContext";
 import { influencers } from "@/lib/influencers-data";
 import { usePrivilegeContract } from "@/hooks/usePrivilegeContract";
+import { useRouter } from "next/navigation";
 
 export default function Marketplace() {
   const { isConnected, walletAddress } = useWallet();
   const [celebrities] = useState(influencers);
   const [searchTerm, setSearchTerm] = useState("");
-  const {
-    buyAccess,
-    checkAccess,
-    isLoading,
-    error: contractError,
-  } = usePrivilegeContract();
+  const { buyAccess, checkAccess, isLoading } = usePrivilegeContract();
   const [userAccess, setUserAccess] = useState<{ [key: string]: boolean[] }>(
     {},
   );
   const [selectedCelebrity, setSelectedCelebrity] = useState<
     (typeof influencers)[0] | null
   >(null);
+  const router = useRouter();
+
+  const [pending, setPending] = useState<{
+    influencerId: string;
+    tierIndex: number;
+  } | null>(null);
 
   const filteredCelebrities = influencers.filter((celebrity) => {
     const searchLower = searchTerm.toLowerCase();
@@ -99,33 +101,21 @@ export default function Marketplace() {
     }
 
     try {
-      console.log("🎯 Buy button clicked");
-      console.log("Influencer ID:", influencerId);
-      console.log("Tier:", tierName, "Price:", tierPrice);
-
-      const result = await buyAccess(influencerId, tierIndex, tierPrice, 30);
-
-      console.log("Transaction result:", result);
+      const result = await buyAccess(influencerId, tierIndex, tierPrice);
 
       if (result?.success) {
         alert(
-          `✅ SUCCESS!\n\nTx Hash: ${result.txHash}\n\nRedirecting to ${tierName}...`,
+          `✅ Transaction confirmed!\nTX: ${result.txHash?.slice(0, 20)}...\n\nRedirecting to your access page...`,
         );
-
-        // Redirect to access page
-        setTimeout(() => {
-          window.location.href = `/access?id=${influencerId}&tier=${tierName}`;
-        }, 1000);
-
         setSelectedCelebrity(null);
-      } else {
-        alert(
-          `❌ TRANSACTION FAILED\n\nReason:\n${result?.error || "Unknown error"}\n\nCheck console for details.`,
+        router.push(
+          `/access?id=${influencerId}&tier=${tierName.toLowerCase()}`,
         );
+      } else {
+        alert(`❌ Transaction failed: ${result?.error ?? "Unknown error"}`);
       }
     } catch (err: any) {
-      console.error("Caught error:", err);
-      alert(`❌ ERROR\n\n${err.message}\n\nCheck console for full details.`);
+      alert(`Error: ${err.message}`);
     }
   };
 
@@ -527,6 +517,9 @@ export default function Marketplace() {
                 ) : (
                   <div className="space-y-3">
                     {selectedCelebrity.tiers.map((tier, idx) => {
+                      const isThisPending =
+                        pending?.influencerId === selectedCelebrity.id &&
+                        pending?.tierIndex === idx;
                       const hasAccess = userAccess[selectedCelebrity.id]?.[idx];
                       const iconMap: { [key: string]: React.ReactNode } = {
                         Chat: <MessageCircle className="w-4 h-4" />,
@@ -559,7 +552,7 @@ export default function Marketplace() {
                             <button
                               onClick={() => {
                                 // Navigate to access page
-                                window.location.href = `/access/${selectedCelebrity.id}/${tier.name.toLowerCase()}`;
+                                window.location.href = `/access?id=${selectedCelebrity.id}&tier=${tier.name.toLowerCase()}`;
                               }}
                               className="w-full bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white font-bold py-2 rounded-lg transition-all text-xs"
                             >
@@ -576,10 +569,10 @@ export default function Marketplace() {
                                   idx,
                                 )
                               }
-                              disabled={isLoading}
+                              disabled={!!pending}
                               className="w-full bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 text-white font-bold py-2 rounded-lg transition-all text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                              {isLoading ? "Processing..." : "Buy Now"}
+                              {isThisPending ? "Processing..." : "Buy Now"}
                             </button>
                           )}
                         </div>

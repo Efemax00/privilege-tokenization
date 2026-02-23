@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useState, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 
 interface WalletContextType {
   isConnected: boolean;
@@ -17,26 +17,34 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [walletAddress, setWalletAddress] = useState('');
   const [wallet, setWallet] = useState<string | null>(null);
 
+  // Restore wallet state on every page load
+  useEffect(() => {
+    const savedAddress = localStorage.getItem('walletAddress');
+    if (savedAddress) {
+      setWalletAddress(savedAddress);
+      setWallet(savedAddress);
+      setIsConnected(true);
+      console.log('✅ Wallet restored from storage:', savedAddress);
+    }
+  }, []);
+
   const connectWallet = async () => {
     try {
-      const { getAddress, AddressPurpose, BitcoinNetworkType } = await import(
-        'sats-connect'
-      );
+      const { getAddress, AddressPurpose, BitcoinNetworkType } = await import('sats-connect');
 
       await getAddress({
         payload: {
           purposes: [AddressPurpose.Payment],
           message: 'Connect to Privilege',
-          network: {
-            type: BitcoinNetworkType.Regtest,
-          },
+          network: { type: BitcoinNetworkType.Regtest },
         },
         onFinish: (response: any) => {
           const address = response.addresses?.[0]?.address;
           if (address) {
             setWalletAddress(address);
-            setWallet(address); // Store wallet address
+            setWallet(address);
             setIsConnected(true);
+            localStorage.setItem('walletAddress', address); // ✅ persist
             console.log('✅ Wallet connected:', address);
           }
         },
@@ -54,13 +62,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setIsConnected(false);
     setWalletAddress('');
     setWallet(null);
+    localStorage.removeItem('walletAddress'); // ✅ clear
     console.log('✅ Wallet disconnected');
   };
 
   return (
-    <WalletContext.Provider
-      value={{ isConnected, walletAddress, wallet, connectWallet, disconnectWallet }}
-    >
+    <WalletContext.Provider value={{ isConnected, walletAddress, wallet, connectWallet, disconnectWallet }}>
       {children}
     </WalletContext.Provider>
   );
@@ -68,8 +75,6 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
 export function useWallet() {
   const context = useContext(WalletContext);
-  if (!context) {
-    throw new Error('useWallet must be used within WalletProvider');
-  }
+  if (!context) throw new Error('useWallet must be used within WalletProvider');
   return context;
 }

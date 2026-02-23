@@ -1,150 +1,136 @@
-import { useState } from 'react';
-import { useWallet } from '@/context/WalletContext';
-import { sendBtcTransaction, BitcoinNetworkType } from 'sats-connect';
+import { useState } from "react";
+import { useWallet } from "@/context/WalletContext";
+import { sendBtcTransaction, BitcoinNetworkType } from "sats-connect";
 
 const YOUR_WALLET = "bcrt1qsmfcnslyhp48w6g6pr86gw3z87qw33hxnzrrx8";
 
 interface TransactionResult {
   success: boolean;
-  txHash?: string | null;
-  message?: string;
+  txHash?: string;
   error?: string;
 }
 
 export const usePrivilegeContract = () => {
   const { walletAddress, isConnected } = useWallet();
   const [isLoading, setIsLoading] = useState(false);
-  const [txHash, setTxHash] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
-  const buyAccess = async (
-    influencerAddress: string,
-    tierIndex: number,
-    priceInSatoshis: number,
-    durationDays: number = 30,
-  ): Promise<TransactionResult | null> => {
-    if (!isConnected || !walletAddress) {
-      const errMsg = 'Wallet not connected';
-      setError(errMsg);
-      console.error('❌', errMsg);
-      return null;
+  // Fetch the latest unconfirmed (mempool) txs sent FROM walletAddress TO YOUR_WALLET
+  const pollForTx = async (
+    senderAddress: string,
+    afterTimestamp: number,
+    maxWaitMs = 30000,
+    intervalMs = 2000,
+  ): Promise<string | null> => {
+    const deadline = Date.now() + maxWaitMs;
+
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, intervalMs));
+
+      try {
+        // Get mempool txs for YOUR_WALLET (the recipient)
+        const res = await fetch(
+          `https://mempool.staging.midl.xyz/api/address/${YOUR_WALLET}/txs`,
+        );
+        if (!res.ok) continue;
+
+        const txs: any[] = await res.json();
+
+        for (const tx of txs) {
+          const isFromSender = tx.vin?.some(
+            (input: any) =>
+              input.prevout?.scriptpubkey_address === senderAddress,
+          );
+
+          // Only accept TX that happened after we initiated the purchase
+          const txTime = (tx.status?.block_time ?? Date.now() / 1000) * 1000;
+          const isRecent = txTime >= afterTimestamp;
+
+          if (isFromSender && isRecent) {
+            console.log("✅ Found TX via polling:", tx.txid);
+            return tx.txid;
+          }
+        }
+      } catch (e) {
+        console.warn("Polling error:", e);
+      }
     }
 
+    return null;
+  };
+
+  const buyAccess = async (
+    influencerId: string,
+    tierIndex: number,
+    priceInSatoshis: number,
+  ): Promise<TransactionResult | null> => {
+    if (!isConnected || !walletAddress) return null;
     setIsLoading(true);
-    setError(null);
 
-    try {
-      console.log('🚀 Starting BTC transaction...');
-      console.log('From:', walletAddress);
-      console.log('To:', YOUR_WALLET);
-      console.log('Amount (satoshis):', priceInSatoshis);
+    return new Promise((resolve) => {
+      let settled = false;
+      const initiatedAt = Date.now();
 
-      // Generate a mock transaction ID (in real scenario, Xverse returns this)
-      let receivedTxId: string | null = null;
-      let hasCancelled = false;
+      const settle = (result: TransactionResult) => {
+        if (settled) return;
+        settled = true;
+        setIsLoading(false);
+        resolve(result);
+      };
 
-      const promise = sendBtcTransaction({
+      const timeoutId = setTimeout(() => {
+        settle({ success: false, error: "Timeout" });
+      }, 60000);
+
+      sendBtcTransaction({
         payload: {
-          network: {
-            type: BitcoinNetworkType.Regtest,
-          },
+          network: { type: BitcoinNetworkType.Regtest },
           recipients: [
-            {
-              address: YOUR_WALLET,
-              amountSats: BigInt(priceInSatoshis),
-            },
+            { address: YOUR_WALLET, amountSats: BigInt(priceInSatoshis) },
           ],
           senderAddress: walletAddress,
         },
         onFinish: (txId: string) => {
-          console.log('✅ onFinish called with txId:', txId);
-          receivedTxId = txId;
+          // If Xverse ever fixes this and onFinish works, handle it normally
+          clearTimeout(timeoutId);
+          console.log("✅ onFinish fired (Xverse fixed?):", txId);
+
+          const key = `privilege_proof_${walletAddress}_${influencerId}_${tierIndex}`;
+          localStorage.setItem(key, JSON.stringify({ txId }));
+          settle({ success: true, txHash: txId });
         },
         onCancel: () => {
-          console.log('⚠️ onCancel called');
-          hasCancelled = true;
+          // DON'T resolve yet — Xverse fires this even on success
+          // Instead, poll the mempool to check if TX actually went through
+          console.log("⚠️ onCancel fired — polling mempool to verify...");
+
+          pollForTx(walletAddress!, initiatedAt).then((txId) => {
+            clearTimeout(timeoutId);
+
+            if (txId) {
+              console.log("✅ TX confirmed via polling:", txId);
+              const key = `privilege_proof_${walletAddress}_${influencerId}_${tierIndex}`;
+              localStorage.setItem(key, JSON.stringify({ txId }));
+              settle({ success: true, txHash: txId });
+            } else {
+              console.log("❌ No TX found in mempool — genuine cancellation");
+              settle({ success: false, error: "Cancelled" });
+            }
+          });
         },
       });
-
-      // Wait a bit for callbacks to fire
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      // Check if we got a transaction ID
-      if (receivedTxId && !hasCancelled) {
-        console.log('✅ Transaction successful:', receivedTxId);
-        setTxHash(receivedTxId);
-        
-        // Save access to localStorage
-        const accessKey = `access_${walletAddress}_${influencerAddress}`;
-        localStorage.setItem(accessKey, receivedTxId);
-        console.log('💾 Saved access to localStorage:', accessKey);
-        
-        setIsLoading(false);
-        return {
-          success: true,
-          txHash: receivedTxId,
-          message: `Access purchased!`,
-        };
-      } else if (hasCancelled) {
-        setIsLoading(false);
-        const errMsg = 'User cancelled transaction';
-        setError(errMsg);
-        return {
-          success: false,
-          error: errMsg,
-        };
-      } else {
-        // Sometimes Xverse doesn't call callbacks, but still sends the tx
-        // Generate a mock ID based on timestamp
-        const mockTxId = `mock_${Date.now()}`;
-        console.log('⚠️ No callback received, using mock txId:', mockTxId);
-        
-        const accessKey = `access_${walletAddress}_${influencerAddress}`;
-        localStorage.setItem(accessKey, mockTxId);
-        console.log('💾 Saved access to localStorage:', accessKey);
-        
-        setTxHash(mockTxId);
-        setIsLoading(false);
-        return {
-          success: true,
-          txHash: mockTxId,
-          message: `Access purchased!`,
-        };
-      }
-    } catch (err: any) {
-      console.error('❌ Transaction error:', err);
-      const errorMessage = err.message || 'Transaction failed';
-      setError(errorMessage);
-      setIsLoading(false);
-      
-      return {
-        success: false,
-        error: errorMessage,
-      };
-    }
+    });
   };
 
   const checkAccess = async (influencerId: string): Promise<boolean[]> => {
-    try {
-      if (!walletAddress) return [false, false, false];
-      
-      const accessKey = `access_${walletAddress}_${influencerId}`;
-      const hasPaid = localStorage.getItem(accessKey);
-      
-      console.log('🔍 Checking access for', influencerId, ':', !!hasPaid);
-      
-      return hasPaid ? [true, false, false] : [false, false, false];
-    } catch (err) {
-      console.error('Error checking access:', err);
-      return [false, false, false];
+    if (!walletAddress) return [false, false, false];
+
+    const results = [];
+    for (let i = 0; i < 3; i++) {
+      const key = `privilege_proof_${walletAddress}_${influencerId}_${i}`;
+      results.push(!!localStorage.getItem(key));
     }
+    return results;
   };
 
-  return {
-    buyAccess,
-    checkAccess,
-    isLoading,
-    txHash,
-    error,
-  };
+  return { buyAccess, checkAccess, isLoading };
 };
